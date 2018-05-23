@@ -318,6 +318,8 @@ namespace Sitecore.Support.Publishing.Service
           new[] { options },
           publishStatus);
 
+      jobOptions.AtomicExecution = false;
+
       var job = JobManager.Start(jobOptions);
 
       return job.Handle;
