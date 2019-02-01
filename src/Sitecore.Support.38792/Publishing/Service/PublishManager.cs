@@ -1,31 +1,32 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Threading;
 using Sitecore.Abstractions;
 using Sitecore.Collections;
 using Sitecore.Configuration;
 using Sitecore.Data;
+using Sitecore.Data.Archiving;
 using Sitecore.Data.Engines.DataCommands;
 using Sitecore.Data.Events;
 using Sitecore.Data.Items;
 using Sitecore.Diagnostics;
+using Sitecore.Eventing;
 using Sitecore.Framework.Publishing;
 using Sitecore.Framework.Publishing.Locators;
 using Sitecore.Framework.Publishing.PublisherOperations;
 using Sitecore.Framework.Publishing.PublishJobQueue;
 using Sitecore.Globalization;
 using Sitecore.Jobs;
+using Sitecore.Publishing;
 using Sitecore.Publishing.Diagnostics;
 using Sitecore.Publishing.Pipelines.Publish;
 using Sitecore.Publishing.Recovery;
-using Sitecore.Publishing.Service.ItemEvents;
-using Sitecore.Publishing.Service.SitecoreAbstractions;
-using Sitecore.Publishing.Service.JobQueue;
-using Sitecore.Data.Archiving;
-using Sitecore.Eventing;
-using Sitecore.Publishing;
 using Sitecore.Publishing.Service;
+using Sitecore.Publishing.Service.ItemEvents;
+using Sitecore.Publishing.Service.JobQueue;
+using Sitecore.Publishing.Service.SitecoreAbstractions;
 
 namespace Sitecore.Support.Publishing.Service
 {
@@ -38,7 +39,7 @@ namespace Sitecore.Support.Publishing.Service
     private readonly IPublishRecoveryStrategy _recoveryStrategy = new NullPublishingServiceRecoverStrategy();
     private readonly ISitecoreSettings _sitecoreSettings;
     private readonly IDatabaseFactory _databaseFactory;
-    private readonly Sitecore.Abstractions.IEventManager _eventManager;
+    private readonly IEventManager _eventManager;
 
     public PublishManager(
         IPublishingJobProviderFactory providerFactory,
@@ -46,11 +47,21 @@ namespace Sitecore.Support.Publishing.Service
         IPublisherOperationService publisherOpsService,
         IItemOperationEmitter operationEmitter,
         BaseLanguageManager languageManager,
-        BaseProxyManager proxyManager,
         BaseFactory factory,
         BaseLog log,
         ProviderHelper<PublishProvider, PublishProviderCollection> providerHelper)
-        : this(providerFactory, publishJobQueueService, publisherOpsService, operationEmitter, new EventManagerWrapper(), new SitecoreSettingsWrapper(), new DatabaseFactoryWrapper(new PublishingLogWrapper()), languageManager, proxyManager, factory, log, providerHelper)
+        : this(providerFactory,
+              publishJobQueueService,
+              publisherOpsService,
+              operationEmitter,
+              new EventManagerWrapper(),
+              new SitecoreSettingsWrapper(),
+              new DatabaseFactoryWrapper(new PublishingLogWrapper()),
+              languageManager,
+              factory,
+              log,
+              providerHelper,
+              new DefaultEventQueueProvider())
     {
     }
 
@@ -59,15 +70,16 @@ namespace Sitecore.Support.Publishing.Service
         IPublishJobQueueService publishJobQueueService,
         IPublisherOperationService publisherOpsService,
         IItemOperationEmitter operationEmitter,
-        Sitecore.Abstractions.IEventManager eventManager,
+        IEventManager eventManager,
         ISitecoreSettings sitecoreSettings,
         IDatabaseFactory databaseFactory,
         BaseLanguageManager languageManager,
-        BaseProxyManager proxyManager,
         BaseFactory factory,
         BaseLog log,
-        ProviderHelper<PublishProvider, PublishProviderCollection> providerHelper)
-        : base(languageManager, proxyManager, factory, log, providerHelper)
+        ProviderHelper<PublishProvider, PublishProviderCollection> providerHelper,
+        BaseEventQueueProvider eventQueueProvider)
+        : base
+        (languageManager, factory, log, providerHelper, eventQueueProvider)
     {
       _publishJobQueueService = publishJobQueueService;
       _publisherOpsService = publisherOpsService;
@@ -78,14 +90,9 @@ namespace Sitecore.Support.Publishing.Service
       _databaseFactory = databaseFactory;
     }
 
-    #region Overrides
-
     public override IPublishRecoveryStrategy PublishRecoveryStrategy
     {
-      get
-      {
-        return _recoveryStrategy;
-      }
+      get { return _recoveryStrategy; }
 
       protected set
       {
@@ -111,7 +118,7 @@ namespace Sitecore.Support.Publishing.Service
     {
       Error.AssertObject(handle, "handle");
 
-      Job job = JobManager.GetJob(handle);
+      var job = JobManager.GetJob(handle);
 
       if (job != null)
       {
@@ -149,18 +156,18 @@ namespace Sitecore.Support.Publishing.Service
     public override Handle PublishIncremental(Database source, Database[] targets, Language[] languages, Language clientLanguage)
     {
       return EnqueuePublishJob(
-            "PublishIncremental",
-            targets,
-            languages,
-            Context.User.Name,
-            Context.Language.Name,
-            true,
-            false,
-            true,
-            PublishJobType.Incremental);
+          "PublishIncremental",
+          targets,
+          languages,
+          Context.User.Name,
+          Context.Language.Name,
+          true,
+          false,
+          true,
+          PublishJobType.Incremental);
     }
 
-    public override Handle PublishItem(Sitecore.Data.Items.Item item, Database[] targets, Language[] languages, bool deep, bool compareRevisions, bool publishRelatedItems)
+    public override Handle PublishItem(Item item, Database[] targets, Language[] languages, bool deep, bool compareRevisions, bool publishRelatedItems)
     {
       return EnqueuePublishJob(
           "PublishItem",
@@ -199,14 +206,20 @@ namespace Sitecore.Support.Publishing.Service
     {
       var builtOptions = options.Select(x =>
       {
-        Guid? rootId = x.RootItem != null ? x.RootItem.ID.Guid : new Guid?();
+        var rootId = x.RootItem != null ? x.RootItem.ID.Guid : new Guid?();
         var serviceOptions = new Framework.Publishing.PublishJobQueue.PublishOptions(
             x.Deep,
             x.PublishRelatedItems,
             Context.User.Name,
             Context.Language.Name,
-            new[] { x.Language.Name },
-            PopulateTargets(GetPublishingTargets(x.SourceDatabase), new[] { x.TargetDatabase }),
+            new[]
+            {
+                        x.Language.Name
+            },
+            PopulateTargets(GetPublishingTargets(x.SourceDatabase), new[]
+            {
+                        x.TargetDatabase
+            }),
             rootId,
             null,
             x.SourceDatabase.Name);
@@ -223,9 +236,9 @@ namespace Sitecore.Support.Publishing.Service
       publishStatus.SetCurrentTarget(options.Select(x => x.TargetDatabase).Distinct().First());
 
       var jobOptions = BuildPublishJobOptions(
-         "Publish",
-         builtOptions,
-         publishStatus);
+          "Publish",
+          builtOptions,
+          publishStatus);
 
       var job = JobManager.Start(jobOptions);
 
@@ -245,10 +258,6 @@ namespace Sitecore.Support.Publishing.Service
       PublishingLog.Audit("'GetPublishQueueEntries' is not implemented in framework publishing.");
       return base.GetPublishQueueEntries(from, to, database);
     }
-
-    #endregion;
-
-    #region Not Supported
 
     public override PublishQueue GetPublishQueue(Database database)
     {
@@ -270,21 +279,18 @@ namespace Sitecore.Support.Publishing.Service
       PublishingLog.Audit(message);
       throw new NotSupportedException(message);
     }
-    #endregion
-
-    #region Private/Protected
 
     protected virtual Handle EnqueuePublishJob(
-      string jobName,
-      Database[] targets,
-      Language[] languages,
-      string username,
-      string contextLanguage,
-      bool publishDescendants,
-      bool publishRelated,
-      bool detectCloneSources,
-      PublishJobType publishType,
-      Item startItem = null)
+        string jobName,
+        Database[] targets,
+        Language[] languages,
+        string username,
+        string contextLanguage,
+        bool publishDescendants,
+        bool publishRelated,
+        bool detectCloneSources,
+        PublishJobType publishType,
+        Item startItem = null)
     {
       var publishStatus = new PublishStatus();
       publishStatus.SetCurrentLanguages(languages);
@@ -300,25 +306,26 @@ namespace Sitecore.Support.Publishing.Service
       }
 
       var options = new Framework.Publishing.PublishJobQueue.PublishOptions(
-              publishDescendants,
-              publishRelated,
-              username,
-              contextLanguage,
-              languages.Select(l => l.Name),
-              PopulateTargets(GetPublishingTargets(db), targets),
-              itemId,
-              null,
-              db.Name);
+          publishDescendants,
+          publishRelated,
+          username,
+          contextLanguage,
+          languages.Select(l => l.Name),
+          PopulateTargets(GetPublishingTargets(db), targets),
+          itemId,
+          null,
+          db.Name);
 
       options.SetPublishType(publishType.ToString());
       options.SetDetectCloneSources(detectCloneSources);
 
       var jobOptions = BuildPublishJobOptions(
           jobName,
-          new[] { options },
+          new[]
+          {
+                    options
+          },
           publishStatus);
-
-      jobOptions.AtomicExecution = false;
 
       var job = JobManager.Start(jobOptions);
 
@@ -338,15 +345,15 @@ namespace Sitecore.Support.Publishing.Service
 
           publishStatus.SetProcessed(1);
           publishStatus.Messages.Add("Publish Requested");
-          publishStatus.Messages.Add(string.Format("\nQueued on : {0}", publishJob.Queued));
+          publishStatus.Messages.Add(string.Format(CultureInfo.InvariantCulture, "\nQueued on : {0}", publishJob.Queued));
 
           if (publishJob == null)
           {
-            throw new ApplicationException(string.Format("Unable to retrieve job. Id: {0}", jobId));
+            throw new ApplicationException(string.Format(CultureInfo.InvariantCulture, "Unable to retrieve job. Id: {0}", jobId));
           }
 
           publishStatus.Messages.Add("\nJob Id : " + publishJob.Id + "\n");
-          publishStatus.Messages.Add(string.Format("Status: {0} ({1})", publishJob.StatusMessage, publishJob.Status.ToString()));
+          publishStatus.Messages.Add(string.Format(CultureInfo.InvariantCulture, "Status: {0} ({1})", publishJob.StatusMessage, publishJob.Status.ToString()));
 
           var status = publishJob.Status;
 
@@ -359,19 +366,22 @@ namespace Sitecore.Support.Publishing.Service
 
             Thread.Sleep(TimeSpan.FromSeconds(3));
             publishJob = _publishJobQueueService.GetJob(jobId).Result;
-            if (publishJob == null) { throw new ApplicationException(string.Format("Unable to retreive job. Id: {0}", jobId)); }
+            if (publishJob == null)
+            {
+              throw new ApplicationException(string.Format(CultureInfo.InvariantCulture, "Unable to retreive job. Id: {0}", jobId));
+            }
             status = publishJob.Status;
           }
 
-          publishStatus.Messages.Add(string.Format("Job Finished: {0} ({1})", publishJob.StatusMessage, publishJob.Status.ToString()));
-          publishStatus.Messages.Add(string.Format("Job Completed on: {0} ", publishJob.Stopped));
+          publishStatus.Messages.Add(string.Format(CultureInfo.InvariantCulture, "Job Finished: {0} ({1})", publishJob.StatusMessage, publishJob.Status.ToString()));
+          publishStatus.Messages.Add(string.Format(CultureInfo.InvariantCulture, "Job Completed on: {0} ", publishJob.Stopped));
           publishStatus.SetFailed(false);
           publishStatus.SetState(JobState.Finished);
         }
       }
       catch (Exception ex)
       {
-        publishStatus.Messages.Add(string.Format("A serious error occured executing the publish job. {0} ({1})", ex.ToString(), ex.Message));
+        publishStatus.Messages.Add(string.Format(CultureInfo.InvariantCulture, "A serious error occured executing the publish job. {0} ({1})", ex.ToString(), ex.Message));
         publishStatus.SetFailed(true);
         publishStatus.SetState(JobState.Finished);
       }
@@ -412,7 +422,7 @@ namespace Sitecore.Support.Publishing.Service
     /// </summary>
     /// <param name="sender">The source of the event.</param>
     /// <param name="e">The <see cref="ExecutedEventArgs{TCommand}"/> instance containing the event data.</param>
-    private void DataEngine_AddedVersion([CanBeNull] object sender, [NotNull] ExecutedEventArgs<AddVersionCommand> e)
+    private new void DataEngine_AddedVersion([CanBeNull] object sender, [NotNull] ExecutedEventArgs<AddVersionCommand> e)
     {
       EmitItemEvent(e.Command.Result, DateTime.UtcNow, GetRestrictions(e.Command.Result), PublisherOperationType.VariantCreated);
     }
@@ -422,7 +432,7 @@ namespace Sitecore.Support.Publishing.Service
     /// </summary>
     /// <param name="sender">The source of the event.</param>
     /// <param name="e">The <see cref="ExecutedEventArgs{TCommand}"/> instance containing the event data.</param>
-    private void DataEngine_CopiedItem([CanBeNull] object sender, [NotNull] ExecutedEventArgs<CopyItemCommand> e)
+    private new void DataEngine_CopiedItem([CanBeNull] object sender, [NotNull] ExecutedEventArgs<CopyItemCommand> e)
     {
       EmitItemEvent(e.Command.Result, DateTime.UtcNow, GetRestrictions(e.Command.Result), PublisherOperationType.VariantSaved);
     }
@@ -432,7 +442,7 @@ namespace Sitecore.Support.Publishing.Service
     /// </summary>
     /// <param name="sender">The source of the event.</param>
     /// <param name="e">The <see cref="ExecutedEventArgs{TCommand}"/> instance containing the event data.</param>
-    private void DataEngine_CreatedItem([CanBeNull] object sender, [NotNull] ExecutedEventArgs<CreateItemCommand> e)
+    private new void DataEngine_CreatedItem([CanBeNull] object sender, [NotNull] ExecutedEventArgs<CreateItemCommand> e)
     {
       EmitItemEvent(e.Command.Result, DateTime.UtcNow, GetRestrictions(e.Command.Result), PublisherOperationType.VariantCreated);
     }
@@ -442,16 +452,17 @@ namespace Sitecore.Support.Publishing.Service
     /// </summary>
     /// <param name="sender">The source of the event.</param>
     /// <param name="e">The <see cref="ExecutedEventArgs{TCommand}"/> instance containing the event data.</param>
-    private void DataEngine_DeletedItem([CanBeNull] object sender, [NotNull] ExecutedEventArgs<DeleteItemCommand> e)
+    private new void DataEngine_DeletedItem([CanBeNull] object sender, [NotNull] ExecutedEventArgs<DeleteItemCommand> e)
     {
       if (string.IsNullOrWhiteSpace(e.Command.Item.Language.Name))
       {
-        PublishingLog.Debug(string.Format("Item: {0} has an empty language value, item deleted event will be skipped", e.Command.Item.ID));
+        PublishingLog.Debug(string.Format(CultureInfo.InvariantCulture, "Item: {0} has an empty language value, item deleted event will be skipped", e.Command.Item.ID));
         return;
       }
+
       // override the itemPath as its not being passed by the data engine in this event
       var parentPath = GetItemPath(e.Command.Database.GetItem(e.Command.ParentId));
-      var fullPath = string.Format("{0}/{1}", parentPath, e.Command.Item.ID.ToString());
+      var fullPath = string.Format(CultureInfo.InvariantCulture, "{0}/{1}", parentPath, e.Command.Item.ID.ToString());
       EmitItemEvent(e.Command.Item, DateTime.UtcNow, GetRestrictions(e.Command.Item), PublisherOperationType.AllVariantsDeleted, fullPath);
     }
 
@@ -460,11 +471,11 @@ namespace Sitecore.Support.Publishing.Service
     /// </summary>
     /// <param name="sender">The source of the event.</param>
     /// <param name="e">The <see cref="ExecutedEventArgs{TCommand}"/> instance containing the event data.</param>
-    private void DataEngine_MovedItem([CanBeNull] object sender, [NotNull] ExecutedEventArgs<MoveItemCommand> e)
+    private new void DataEngine_MovedItem([CanBeNull] object sender, [NotNull] ExecutedEventArgs<MoveItemCommand> e)
     {
       if (string.IsNullOrWhiteSpace(e.Command.Item.Language.Name))
       {
-        PublishingLog.Debug(string.Format("Item: {0} has an empty language value, item moved event will be skipped", e.Command.Item.ID));
+        PublishingLog.Debug(string.Format(CultureInfo.InvariantCulture, "Item: {0} has an empty language value, item moved event will be skipped", e.Command.Item.ID));
         return;
       }
 
@@ -476,7 +487,7 @@ namespace Sitecore.Support.Publishing.Service
     /// </summary>
     /// <param name="sender">The source of the event.</param>
     /// <param name="e">The <see cref="ExecutedEventArgs{TCommand}"/> instance containing the event data.</param>
-    private void DataEngine_RemovedVersion([CanBeNull] object sender, [NotNull] ExecutedEventArgs<RemoveVersionCommand> e)
+    private new void DataEngine_RemovedVersion([CanBeNull] object sender, [NotNull] ExecutedEventArgs<RemoveVersionCommand> e)
     {
       EmitItemEvent(e.Command.Item, DateTime.UtcNow, GetRestrictions(e.Command.Item), PublisherOperationType.VariantDeleted);
     }
@@ -486,11 +497,11 @@ namespace Sitecore.Support.Publishing.Service
     /// </summary>
     /// <param name="sender">The source of the event.</param>
     /// <param name="e">The <see cref="ExecutedEventArgs{TCommand}"/> instance containing the event data.</param>
-    private void DataEngine_SavedItem([CanBeNull] object sender, [NotNull] ExecutedEventArgs<SaveItemCommand> e)
+    private new void DataEngine_SavedItem([CanBeNull] object sender, [NotNull] ExecutedEventArgs<SaveItemCommand> e)
     {
       if (string.IsNullOrWhiteSpace(e.Command.Item.Language.Name))
       {
-        PublishingLog.Debug(string.Format("Item: {0} has an empty language value, item saved event will be skipped", e.Command.Item.ID));
+        PublishingLog.Debug(string.Format(CultureInfo.InvariantCulture, "Item: {0} has an empty language value, item saved event will be skipped", e.Command.Item.ID));
         return;
       }
 
@@ -499,13 +510,13 @@ namespace Sitecore.Support.Publishing.Service
 
     private void RestoreItemCompletedEventHandler(RestoreItemCompletedEvent e, EventContext context)
     {
-      var db = this._databaseFactory.GetDatabase(e.DatabaseName);
+      var db = _databaseFactory.GetDatabase(e.DatabaseName);
       var item = db.GetItem(new ID(e.ItemId));
 
       EmitItemEvent(item, DateTime.UtcNow, GetRestrictions(item), PublisherOperationType.VariantCreated);
     }
 
-    private void EmitItemEvent(Sitecore.Data.Items.Item item, DateTime timestamp, ItemOperationRestrictions restrictions, PublisherOperationType operation, string itemPath = null)
+    private void EmitItemEvent(Item item, DateTime timestamp, ItemOperationRestrictions restrictions, PublisherOperationType operation, string itemPath = null)
     {
       var finalRevision = TimeBasedGuidFactory.GenerateTimeBasedGuid();
 
@@ -521,18 +532,18 @@ namespace Sitecore.Support.Publishing.Service
           : itemPath;
 
       _operationEmitter.PostOperation(
-              new ItemOperationData(
-                  DateTime.UtcNow,
-                  restrictions,
-                  new ItemVariantLocator(
-                      item.Database.Name,
-                      item.ID.Guid,
-                      item.Language.Name,
-                      item.Version.Number),
-                  finalRevision,
-                  itemPath,
-                  operation)
-          );
+          new ItemOperationData(
+              DateTime.UtcNow,
+              restrictions,
+              new ItemVariantLocator(
+                  item.Database.Name,
+                  item.ID.Guid,
+                  item.Language.Name,
+                  item.Version.Number),
+              finalRevision,
+              itemPath,
+              operation)
+      );
     }
 
     private ItemOperationRestrictions GetRestrictions(Item item)
@@ -544,7 +555,7 @@ namespace Sitecore.Support.Publishing.Service
           item.Publishing.ValidTo);
     }
 
-    private string GetItemPath(Sitecore.Data.Items.Item item)
+    private string GetItemPath(Item item)
     {
       return item.Paths.GetPath(ItemPathType.ItemID);
     }
@@ -555,7 +566,10 @@ namespace Sitecore.Support.Publishing.Service
       {
         var targetDbName = item["Target database"];
 
-        if (string.IsNullOrWhiteSpace(targetDbName)) continue;
+        if (string.IsNullOrWhiteSpace(targetDbName))
+        {
+          continue;
+        }
 
         foreach (var database in targetDbsFromDialog)
         {
@@ -566,7 +580,5 @@ namespace Sitecore.Support.Publishing.Service
         }
       }
     }
-
-    #endregion
   }
 }
