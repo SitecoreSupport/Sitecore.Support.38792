@@ -326,7 +326,6 @@ namespace Sitecore.Support.Publishing.Service
                     options
           },
           publishStatus);
-      jobOptions.AtomicExecution = false;
 
       var job = JobManager.Start(jobOptions);
 
@@ -365,7 +364,7 @@ namespace Sitecore.Support.Publishing.Service
               publishStatus.SetState(JobState.Running);
             }
 
-            Thread.Sleep(TimeSpan.FromSeconds(3));
+            Thread.Sleep(TimeSpan.FromMilliseconds(500));
             publishJob = _publishJobQueueService.GetJob(jobId).Result;
             if (publishJob == null)
             {
