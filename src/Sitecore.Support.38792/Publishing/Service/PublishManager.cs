@@ -318,7 +318,7 @@ namespace Sitecore.Support.Publishing.Service
           new[] { options },
           publishStatus);
 
-      jobOptions.AtomicExecution = false;
+      //jobOptions.AtomicExecution = false; - Rollback 
 
       var job = JobManager.Start(jobOptions);
 
@@ -357,7 +357,8 @@ namespace Sitecore.Support.Publishing.Service
               publishStatus.SetState(JobState.Running);
             }
 
-            Thread.Sleep(TimeSpan.FromSeconds(3));
+            //Thread.Sleep(TimeSpan.FromSeconds(3)); - FIX
+			Thread.Sleep(TimeSpan.FromMilliseconds(500));
             publishJob = _publishJobQueueService.GetJob(jobId).Result;
             if (publishJob == null) { throw new ApplicationException(string.Format("Unable to retreive job. Id: {0}", jobId)); }
             status = publishJob.Status;
